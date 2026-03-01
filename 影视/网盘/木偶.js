@@ -1714,7 +1714,10 @@ async function detail(params) {
       throw new Error("视频ID不能为空");
     }
 
-    OmniBox.log("info", `获取视频详情: videoId=${videoId}`);
+    // 获取来源参数（可选）
+    const source = params.source || "";
+
+    OmniBox.log("info", `获取视频详情: videoId=${videoId}, source=${source}`);
 
     // 构建完整 URL
     const webUrl = removeTrailingSlash(WEB_SITE) + videoId;
@@ -1784,9 +1787,19 @@ async function detail(params) {
 
     OmniBox.log("info", `解析完成，找到 ${panUrls.length} 个网盘链接`);
 
-    // 构建新格式的播放源（vod_play_sources）
+    // 构建新格式的播放源(vod_play_sources)
     const playSources = [];
-    const driveNames = []; // 用于统计重复名称
+
+    // 先统计每种网盘类型的数量
+    const driveTypeCountMap = {};
+    for (const shareURL of panUrls) {
+      const driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
+      const displayName = driveInfo.displayName || "未知网盘";
+      driveTypeCountMap[displayName] = (driveTypeCountMap[displayName] || 0) + 1;
+    }
+
+    // 记录每种网盘类型当前的序号
+    const driveTypeCurrentIndexMap = {};
 
     for (const shareURL of panUrls) {
       try {
@@ -1795,9 +1808,15 @@ async function detail(params) {
         // 获取网盘信息
         const driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
         let displayName = driveInfo.displayName || "未知网盘";
-        driveNames.push(displayName);
 
-        OmniBox.log("info", `网盘类型: ${displayName}`);
+        // 如果该类型网盘有多个，给当前网盘添加序号
+        const totalCount = driveTypeCountMap[displayName] || 0;
+        if (totalCount > 1) {
+          driveTypeCurrentIndexMap[displayName] = (driveTypeCurrentIndexMap[displayName] || 0) + 1;
+          displayName = `${displayName}${driveTypeCurrentIndexMap[displayName]}`;
+        }
+
+        OmniBox.log("info", `网盘类型: ${displayName}, driveType: ${driveInfo.driveType}`);
 
         // 获取文件列表
         const fileList = await OmniBox.getDriveFileList(shareURL, "0");
@@ -1806,7 +1825,7 @@ async function detail(params) {
           continue;
         }
 
-        OmniBox.log("info", `获取文件列表成功，文件数量: ${fileList.files.length}`);
+        OmniBox.log("info", `获取文件列表成功,文件数量: ${fileList.files.length}`);
 
         // 递归获取所有视频文件
         const allVideoFiles = await getAllVideoFiles(shareURL, fileList.files, "0");
@@ -1816,71 +1835,92 @@ async function detail(params) {
           continue;
         }
 
-        OmniBox.log("info", `递归获取视频文件完成，视频文件数量: ${allVideoFiles.length}`);
+        OmniBox.log("info", `递归获取视频文件完成,视频文件数量: ${allVideoFiles.length}`);
 
-        // 构建该网盘的剧集列表
-        const episodes = [];
-        for (const file of allVideoFiles) {
-          const fileName = file.file_name || "";
-          const fileId = file.fid || "";
-          const fileSize = file.size || file.file_size || 0;
+        // 确定播放源列表（线路） 
+        let sourceNames = [displayName]; // 默认使用网盘名称
+        if (driveInfo.driveType === "quark" || driveInfo.driveType === "uc") {
+          // 夸克和UC网盘支持多线路
+          sourceNames = ["本地代理", "服务端代理", "直连"];
+          OmniBox.log("info", `${displayName}支持多线路: ${sourceNames.join(", ")}`);
 
-          if (!fileName || !fileId) {
-            continue;
+          // 如果来源是网页端，过滤掉"本地代理"线路
+          if (source === "web") {
+            sourceNames = sourceNames.filter((name) => name !== "本地代理");
+            OmniBox.log("info", `来源为网页端，已过滤掉"本地代理"线路`);
           }
 
-          // 格式化文件大小，在文件名前添加 [大小] 前缀
-          let displayFileName = fileName;
-          if (fileSize > 0) {
-            const fileSizeStr = formatFileSize(fileSize);
-            if (fileSizeStr) {
-              displayFileName = `[${fileSizeStr}] ${fileName}`;
-            }
-          }
+          // const isIntranet = (url) => {
+          //   try {
+          //     const hostname = new URL(url).hostname;
+          //     return hostname === 'localhost'
+          //       || /^127\./.test(hostname)
+          //       || /^10\./.test(hostname)
+          //       || /^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)
+          //       || /^192\.168\./.test(hostname)
+          //       || /^169\.254\./.test(hostname);
+          //   } catch {
+          //     return false;
+          //   }
+          // };
+          // const baseUrl = process.env.OMNIBOX_BASE_URL;
+          // OmniBox.log("info", `OMNIBOX_BASE_URL: ${baseUrl}`);
 
-          // 构建剧集对象
-          const episode = {
-            name: displayFileName,
-            playId: `${shareURL}|${fileId}`, // 格式：分享链接|文件ID
-            size: fileSize > 0 ? fileSize : undefined,
-          };
-
-          episodes.push(episode);
+          // if (!isIntranet(baseUrl)) {
+          //   sourceNames = sourceNames.filter((name) => name !== "服务端代理");
+          //   OmniBox.log("info", `来源为外网，已过滤掉"服务端代理"线路`);
+          // }
         }
 
-        if (episodes.length > 0) {
-          playSources.push({
-            name: displayName,
-            episodes: episodes,
-          });
+        // 为每个线路构建剧集列表
+        for (const sourceName of sourceNames) {
+          const episodes = [];
+          for (const file of allVideoFiles) {
+            const fileName = file.file_name || "";
+            const fileId = file.fid || "";
+            const fileSize = file.size || file.file_size || 0;
+
+            if (!fileName || !fileId) {
+              continue;
+            }
+
+            // 格式化文件大小,在文件名前添加 [大小] 前缀
+            let displayFileName = fileName;
+            if (fileSize > 0) {
+              const fileSizeStr = formatFileSize(fileSize);
+              if (fileSizeStr) {
+                displayFileName = `[${fileSizeStr}] ${fileName}`;
+              }
+            }
+
+            // 构建剧集对象
+            const episode = {
+              name: displayFileName,
+              playId: `${shareURL}|${fileId}`,
+              size: fileSize > 0 ? fileSize : undefined,
+            };
+
+            episodes.push(episode);
+          }
+
+          if (episodes.length > 0) {
+            // 如果是夸克/UC的多线路，使用 "网盘名-线路名" 作为播放源名称
+            let finalSourceName = sourceName;
+            if (driveInfo.driveType === "quark" || driveInfo.driveType === "uc") {
+              finalSourceName = `${displayName}-${sourceName}`;
+            }
+
+            playSources.push({
+              name: finalSourceName,
+              episodes: episodes,
+            });
+          }
         }
       } catch (error) {
         OmniBox.log("error", `处理网盘链接失败: ${shareURL}, 错误: ${error.message}`);
         if (error.stack) {
           OmniBox.log("error", `错误堆栈: ${error.stack}`);
         }
-        // 即使某个网盘处理失败，也继续处理其他网盘
-      }
-    }
-
-    // 处理重复的网盘名称，添加序号
-    // 先统计每个名称出现的总次数
-    const nameTotalCountMap = {};
-    for (const source of playSources) {
-      const name = source.name;
-      nameTotalCountMap[name] = (nameTotalCountMap[name] || 0) + 1;
-    }
-
-    // 为重复的名称添加序号
-    const nameCurrentCountMap = {}; // 记录每个名称当前已出现的次数
-    for (const source of playSources) {
-      const name = source.name;
-      const totalCount = nameTotalCountMap[name] || 0;
-
-      // 如果该名称只出现一次，不需要添加序号
-      if (totalCount > 1) {
-        nameCurrentCountMap[name] = (nameCurrentCountMap[name] || 0) + 1;
-        source.name = `${name}${nameCurrentCountMap[name]}`;
       }
     }
 
@@ -2115,11 +2155,18 @@ async function play(params) {
       // 弹幕匹配失败不影响播放，继续执行
     }
 
-    // OmniBox.log("info", `OMNIBOX_BASE_URL: ${process.env.OMNIBOX_BASE_URL}`)
+    // 从flag中提取线路类型
+    // flag格式：夸克网盘1-本地代理
+    let routeType = "服务端代理"; // 默认使用服务端代理
+    if (flag && flag.includes("-")) {
+      const parts = flag.split("-");
+      routeType = parts[parts.length - 1]; // 取最后一部分作为线路类型
+    }
 
-    // 使用SDK获取播放信息（自动获取stoken和fid_token，flag参数用于处理URL前缀）
-    // 对于夸克和UC网盘，如果flag是"服务端代理"或"本地代理"，后端会自动添加前缀
-    const playInfo = await OmniBox.getDriveVideoPlayInfo(shareURL, fileId, "服务端代理");
+    OmniBox.log("info", `使用线路: ${routeType}`);
+
+    // 使用SDK获取播放信息
+    const playInfo = await OmniBox.getDriveVideoPlayInfo(shareURL, fileId, routeType);
 
     if (!playInfo || !playInfo.url || !Array.isArray(playInfo.url) || playInfo.url.length === 0) {
       throw new Error("无法获取播放地址");
