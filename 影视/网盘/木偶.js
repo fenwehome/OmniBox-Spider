@@ -2,7 +2,7 @@
 // @author
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.1
+// @version 1.2.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/木偶.js
 
 // 引入 OmniBox SDK
@@ -33,6 +33,10 @@ const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc").split(';
 const SOURCE_NAMES_CONFIG = (process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连").split(';').map(s => s.trim()).filter(s => s);
 // 读取环境变量:详情页播放线路的网盘排序顺序。仅作用于 detail() 里的播放线路，不作用于搜索结果。
 const DRIVE_ORDER = (process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").split(';').map(s => s.trim().toLowerCase()).filter(Boolean);
+// 详情链路缓存时间（秒），默认 12 小时
+const MUOU_CACHE_EX_SECONDS = Number(process.env.MUOU_CACHE_EX_SECONDS || 43200);
+// 是否异步刮削，默认 true。仅当明确配置为 false 时才走同步刮削。
+const ASYNC_SCRAPING = String(process.env.ASYNC_SCRAPING || "true").toLowerCase() !== "false";
 // ==================== 配置区域结束 ====================
 
 /**
@@ -118,6 +122,27 @@ function isBlockedHtml(body = "") {
     lower.includes("captcha") ||
     lower.includes("访问验证")
   );
+}
+
+function buildCacheKey(prefix, value) {
+  return `${prefix}:${value}`;
+}
+
+async function getCachedJSON(key) {
+  try {
+    return await OmniBox.getCache(key);
+  } catch (error) {
+    OmniBox.log("warn", `读取缓存失败: key=${key}, error=${error.message}`);
+    return null;
+  }
+}
+
+async function setCachedJSON(key, value, exSeconds) {
+  try {
+    await OmniBox.setCache(key, value, exSeconds);
+  } catch (error) {
+    OmniBox.log("warn", `写入缓存失败: key=${key}, error=${error.message}`);
+  }
 }
 
 /**
@@ -675,7 +700,18 @@ async function detail(params, context) {
     const source = params.source || "";
     OmniBox.log("info", `获取视频详情: videoId=${videoId}, source=${source}`);
 
-    const { response, baseUrl } = await requestWithFailover(videoId);
+    const detailCacheKey = buildCacheKey("muou:detailHtml", videoId);
+    let detailPage = await getCachedJSON(detailCacheKey);
+    if (!detailPage) {
+      detailPage = await requestWithFailover(videoId);
+      if (detailPage && detailPage.response && detailPage.response.statusCode === 200 && detailPage.response.body) {
+        await setCachedJSON(detailCacheKey, detailPage, MUOU_CACHE_EX_SECONDS);
+      }
+    } else {
+      OmniBox.log("info", `命中详情页缓存: ${videoId}`);
+    }
+
+    const { response, baseUrl } = detailPage;
 
     if (response.statusCode !== 200 || !response.body) {
       throw new Error(`请求失败: HTTP ${response.statusCode}`);
@@ -743,7 +779,12 @@ async function detail(params, context) {
       try {
         OmniBox.log("info", `处理网盘链接: ${shareURL}`);
 
-        const driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
+        const driveInfoCacheKey = buildCacheKey("muou:driveInfo", shareURL);
+        let driveInfo = await getCachedJSON(driveInfoCacheKey);
+        if (!driveInfo) {
+          driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
+          await setCachedJSON(driveInfoCacheKey, driveInfo, MUOU_CACHE_EX_SECONDS);
+        }
         let displayName = driveInfo.displayName || "未知网盘";
 
         const totalCount = driveTypeCountMap[displayName] || 0;
@@ -754,7 +795,19 @@ async function detail(params, context) {
 
         OmniBox.log("info", `网盘类型: ${displayName}, driveType: ${driveInfo.driveType}`);
 
-        const fileList = await OmniBox.getDriveFileList(shareURL, "0");
+        const rootFilesCacheKey = buildCacheKey("muou:rootFiles", shareURL);
+        const videoFilesCacheKey = buildCacheKey("muou:videoFiles", shareURL);
+
+        let fileList = await getCachedJSON(rootFilesCacheKey);
+        if (!fileList) {
+          fileList = await OmniBox.getDriveFileList(shareURL, "0");
+          if (fileList && fileList.files && Array.isArray(fileList.files)) {
+            await setCachedJSON(rootFilesCacheKey, fileList, MUOU_CACHE_EX_SECONDS);
+          }
+        } else {
+          OmniBox.log("info", `命中根目录文件列表缓存: ${shareURL}`);
+        }
+
         if (!fileList || !fileList.files || !Array.isArray(fileList.files)) {
           OmniBox.log("warn", `获取文件列表失败: ${shareURL}`);
           return null;
@@ -762,7 +815,15 @@ async function detail(params, context) {
 
         OmniBox.log("info", `从分享链接 ${shareURL} 获取文件列表成功,文件数量: ${fileList.files.length}`);
 
-        const allVideoFiles = await getAllVideoFiles(shareURL, fileList.files, "0");
+        let allVideoFiles = await getCachedJSON(videoFilesCacheKey);
+        if (!Array.isArray(allVideoFiles) || allVideoFiles.length === 0) {
+          allVideoFiles = await getAllVideoFiles(shareURL, fileList.files, "0");
+          if (Array.isArray(allVideoFiles) && allVideoFiles.length > 0) {
+            await setCachedJSON(videoFilesCacheKey, allVideoFiles, MUOU_CACHE_EX_SECONDS);
+          }
+        } else {
+          OmniBox.log("info", `命中视频文件缓存: ${shareURL}, 数量: ${allVideoFiles.length}`);
+        }
 
         if (allVideoFiles.length === 0) {
           OmniBox.log("warn", `未找到视频文件: ${shareURL}`);
@@ -771,57 +832,120 @@ async function detail(params, context) {
 
         OmniBox.log("info", `递归获取视频文件完成,视频文件数量: ${allVideoFiles.length}`);
 
-        // 刮削处理
-        try {
-          OmniBox.log("info", `开始执行刮削处理,资源名: ${vodName}, 视频文件数: ${allVideoFiles.length}`);
+        const metadataCacheKey = buildCacheKey("muou:metadata", shareURL);
+        const metadataRefreshLockKey = buildCacheKey("muou:metadataRefreshLock", shareURL);
 
-          const videoFilesForScraping = allVideoFiles.map((file) => {
-            const fileId = file.fid || file.file_id || "";
-            const formattedFileId = fileId ? `${shareURL}|${fileId}|${videoId}` : fileId;
-            return {
-              ...file,
-              fid: formattedFileId,
-              file_id: formattedFileId,
-            };
-          });
-
-          OmniBox.log("info", `文件ID格式转换完成,示例: ${videoFilesForScraping[0]?.fid || "N/A"}`);
-
-          const scrapingResult = await OmniBox.processScraping(videoId, vodName, vodName, videoFilesForScraping);
-          OmniBox.log("info", `刮削处理完成,结果: ${JSON.stringify(scrapingResult).substring(0, 200)}`);
-          scrapingSuccess = true;
-        } catch (error) {
-          OmniBox.log("error", `刮削处理失败: ${error.message}`);
-          if (error.stack) {
-            OmniBox.log("error", `刮削错误堆栈: ${error.stack}`);
-          }
-        }
-
-        // 获取刮削后的元数据
+        // 优先读缓存元数据；命中则直接用，同时后台异步刷新
         let scrapeData = null;
         let videoMappings = [];
         let scrapeType = "";
+        let cachedMetadata = await getCachedJSON(metadataCacheKey);
 
-        try {
-          OmniBox.log("info", `开始获取元数据,videoId: ${params.videoId}`);
-          const metadata = await OmniBox.getScrapeMetadata(videoId);
-          OmniBox.log("info", `获取元数据响应: ${JSON.stringify(metadata).substring(0, 500)}`);
-
-          scrapeData = metadata.scrapeData || null;
-          videoMappings = metadata.videoMappings || [];
-          scrapeType = metadata.scrapeType || "";
-
-          if (scrapeData) {
-            OmniBox.log("info", `获取到刮削数据,标题: ${scrapeData.title || "未知"}, 类型: ${scrapeType || "未知"}, 映射数量: ${videoMappings.length}`);
-          } else {
-            OmniBox.log("warn", `未获取到刮削数据,映射数量: ${videoMappings.length}`);
-          }
-        } catch (error) {
-          OmniBox.log("error", `获取元数据失败: ${error.message}`);
-          if (error.stack) {
-            OmniBox.log("error", `获取元数据错误堆栈: ${error.stack}`);
-          }
+        if (cachedMetadata) {
+          scrapeData = cachedMetadata.scrapeData || null;
+          videoMappings = cachedMetadata.videoMappings || [];
+          scrapeType = cachedMetadata.scrapeType || "";
+          OmniBox.log("info", `命中元数据缓存: ${shareURL}, 映射数量: ${videoMappings.length}`);
         }
+
+        const refreshMetadataInBackground = async () => {
+          const refreshLock = await getCachedJSON(metadataRefreshLockKey);
+          if (refreshLock) {
+            return;
+          }
+
+          await setCachedJSON(metadataRefreshLockKey, { refreshing: true }, MUOU_CACHE_EX_SECONDS);
+
+          try {
+            OmniBox.log("info", `后台刷新元数据: ${shareURL}`);
+            const videoFilesForScraping = allVideoFiles.map((file) => {
+              const fileId = file.fid || file.file_id || "";
+              const formattedFileId = fileId ? `${shareURL}|${fileId}|${videoId}` : fileId;
+              return {
+                ...file,
+                fid: formattedFileId,
+                file_id: formattedFileId,
+              };
+            });
+
+            await OmniBox.processScraping(shareURL, vodName, vodName, videoFilesForScraping);
+            const metadata = await OmniBox.getScrapeMetadata(shareURL);
+            const normalizedMetadata = {
+              scrapeData: metadata?.scrapeData || null,
+              videoMappings: metadata?.videoMappings || [],
+              scrapeType: metadata?.scrapeType || "",
+            };
+            await setCachedJSON(metadataCacheKey, normalizedMetadata, MUOU_CACHE_EX_SECONDS);
+          } catch (error) {
+            OmniBox.log("warn", `后台刷新元数据失败: ${error.message}`);
+          }
+        };
+
+        const tryReloadMetadataOnce = async () => {
+          try {
+            const metadata = await OmniBox.getScrapeMetadata(shareURL);
+            if (metadata) {
+              scrapeData = metadata.scrapeData || scrapeData;
+              videoMappings = metadata.videoMappings || videoMappings;
+              scrapeType = metadata.scrapeType || scrapeType;
+              if (scrapeData || (Array.isArray(videoMappings) && videoMappings.length > 0)) {
+                OmniBox.log("info", `补读元数据成功: ${shareURL}, 映射数量: ${videoMappings.length}`);
+              }
+            }
+          } catch (error) {
+            OmniBox.log("warn", `补读元数据失败: ${error.message}`);
+          }
+        };
+
+        if (!cachedMetadata) {
+          if (ASYNC_SCRAPING) {
+            OmniBox.log("info", `未命中元数据缓存，按异步模式后台刷新: ${shareURL}`);
+            refreshMetadataInBackground().catch((error) => {
+              OmniBox.log("warn", `异步刷新元数据失败: ${error.message}`);
+            });
+          } else {
+            try {
+              OmniBox.log("info", `未命中元数据缓存，开始同步获取元数据: ${shareURL}`);
+              const videoFilesForScraping = allVideoFiles.map((file) => {
+                const fileId = file.fid || file.file_id || "";
+                const formattedFileId = fileId ? `${shareURL}|${fileId}|${videoId}` : fileId;
+                return {
+                  ...file,
+                  fid: formattedFileId,
+                  file_id: formattedFileId,
+                };
+              });
+
+              await OmniBox.processScraping(shareURL, vodName, vodName, videoFilesForScraping);
+              scrapingSuccess = true;
+              const metadata = await OmniBox.getScrapeMetadata(shareURL);
+              scrapeData = metadata?.scrapeData || null;
+              videoMappings = metadata?.videoMappings || [];
+              scrapeType = metadata?.scrapeType || "";
+
+              await setCachedJSON(metadataCacheKey, {
+                scrapeData,
+                videoMappings,
+                scrapeType,
+              }, MUOU_CACHE_EX_SECONDS);
+
+              if (scrapeData) {
+                OmniBox.log("info", `同步获取元数据成功, 标题: ${scrapeData.title || "未知"}, 映射数量: ${videoMappings.length}`);
+              }
+            } catch (error) {
+              OmniBox.log("error", `同步获取元数据失败: ${error.message}`);
+              if (error.stack) {
+                OmniBox.log("error", `同步获取元数据错误堆栈: ${error.stack}`);
+              }
+            }
+          }
+        } else {
+          refreshMetadataInBackground().catch((error) => {
+            OmniBox.log("warn", `异步刷新元数据失败: ${error.message}`);
+          });
+        }
+
+        await tryReloadMetadataOnce();
 
         return {
           shareURL,
