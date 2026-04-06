@@ -2,7 +2,7 @@
 // @author 梦
 // @description 刮削：未接入，弹幕：未接入，嗅探：不需要（直链优先，支持网盘线路展开）
 // @dependencies
-// @version 1.2.1
+// @version 1.2.2
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/openclaw/影视/采集/LIBVIO.js
 
 const http = require("http");
@@ -322,6 +322,19 @@ function parseVodList(html = "") {
     return results;
 }
 
+function normalizePanSourceName(name = "") {
+    const text = stripTags(name);
+    const match = text.match(/\(([^()]+)\)/);
+    if (match?.[1]) return match[1].trim();
+    return text.replace(/^视频下载\s*/u, "").trim() || text;
+}
+
+function splitNetdiskPanels(html = "") {
+    const marker = '<div class="playlist-panel netdisk-panel">';
+    const pieces = String(html || "").split(marker);
+    return pieces.slice(1).map((part) => marker + part);
+}
+
 function parseMetaItems(html = "") {
     return ensureArray(html.match(/<span class="meta-item">([\s\S]*?)<\/span>/g)).map((item) => stripTags(item));
 }
@@ -541,12 +554,11 @@ async function detail(params, context) {
             return { name: sourceName, episodes };
         }).filter((item) => item.episodes.length);
 
-        const netdiskBlockRegex = /<div class="playlist-panel\s+netdisk-panel">([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>/g;
+        const netdiskPanels = splitNetdiskPanels(html);
         const netdiskSources = [];
-        for (const matched of html.matchAll(netdiskBlockRegex)) {
-            const block = matched[1] || "";
-            const sourceName = stripTags(block.match(/<h3>([\s\S]*?)<\/h3>/)?.[1] || "网盘");
-            const shareItems = [...block.matchAll(/<a class="netdisk-item"[^>]*href="([^"]+)"[^>]*>[\s\S]*?<span class="netdisk-name">([\s\S]*?)<\/span>[\s\S]*?<span class="netdisk-url">([\s\S]*?)<\/span>/g)];
+        for (const panelHtml of netdiskPanels) {
+            const sourceName = normalizePanSourceName(panelHtml.match(/<h3>([\s\S]*?)<\/h3>/)?.[1] || "网盘");
+            const shareItems = [...panelHtml.matchAll(/<a class="netdisk-item"[^>]*href="([^"]+)"[^>]*>[\s\S]*?<span class="netdisk-name">([\s\S]*?)<\/span>[\s\S]*?<span class="netdisk-url">([\s\S]*?)<\/span>/g)];
             const episodes = [];
             for (const item of shareItems) {
                 const shareUrl = normalizeShareUrl(stripTags(item[3] || item[1] || "").trim());
