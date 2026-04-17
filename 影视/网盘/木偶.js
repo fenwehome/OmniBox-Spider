@@ -2,7 +2,7 @@
 // @author
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.7
+// @version 1.2.9
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/木偶.js
 
 // 引入 OmniBox SDK
@@ -24,15 +24,24 @@ const https = require("https");
 const fs = require("fs");
 
 // ==================== 配置区域 ====================
-// 网站地址(可以通过环境变量配置,支持多个域名用;分割)
+function splitConfigList(value) {
+  return String(value || "")
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+// 网站地址(可以通过环境变量配置,支持多个域名用逗号/分号分割)
 const WEB_SITE_CONFIG = process.env.WEB_SITE_MUOU || "https://www.muou.site;https://www.muou.asia;https://666.666291.xyz;";
-const WEB_SITES = WEB_SITE_CONFIG.split(';').map(url => url.trim()).filter(url => url);
-// 读取环境变量:支持多个网盘类型,用分号分割
-const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc").split(';').map(t => t.trim()).filter(t => t);
-// 读取环境变量:线路名称和顺序,用分号分割
-const SOURCE_NAMES_CONFIG = (process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连").split(';').map(s => s.trim()).filter(s => s);
+const WEB_SITES = splitConfigList(WEB_SITE_CONFIG);
+// 读取环境变量:支持多个网盘类型,用逗号/分号分割
+const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || "quark;uc");
+// 读取环境变量:线路名称和顺序,用逗号/分号分割
+const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连");
+// 是否开启外网服务器代理（默认关闭）
+const EXTERNAL_SERVER_PROXY_ENABLED = String(process.env.EXTERNAL_SERVER_PROXY_ENABLED || "false").toLowerCase() === "true";
 // 读取环境变量:详情页播放线路的网盘排序顺序。仅作用于 detail() 里的播放线路，不作用于搜索结果。
-const DRIVE_ORDER = (process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").split(';').map(s => s.trim().toLowerCase()).filter(Boolean);
+const DRIVE_ORDER = splitConfigList(process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").map(s => s.toLowerCase());
 // 详情链路缓存时间（秒），默认 12 小时
 const MUOU_CACHE_EX_SECONDS = Number(process.env.MUOU_CACHE_EX_SECONDS || 43200);
 const MUOU_VERBOSE_DETAIL = String(process.env.MUOU_VERBOSE_DETAIL || "0") === "1";
@@ -72,6 +81,91 @@ function sortPlaySourcesByDriveOrder(playSources = []) {
     if (aOrder !== bOrder) return aOrder - bOrder;
     return 0;
   });
+}
+
+function resolveCallerSource(params = {}, context = {}) {
+  return String(context?.from || params?.source || "").toLowerCase();
+}
+
+function getBaseURLHost(context = {}) {
+  const baseURL = String(context?.baseURL || "").trim();
+  if (!baseURL) return "";
+  try {
+    return new URL(baseURL).hostname.toLowerCase();
+  } catch (error) {
+    return baseURL.toLowerCase();
+  }
+}
+
+function isPrivateHost(hostname = "") {
+  const host = String(hostname || "").toLowerCase();
+  if (!host) return false;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") return true;
+  if (/^(10\.|192\.168\.|169\.254\.)/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return true;
+  if (host.endsWith(".local") || host.endsWith(".lan") || host.endsWith(".internal") || host.endsWith(".intra")) return true;
+  if (host.includes(":")) return host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80");
+  return false;
+}
+
+function canUseServerProxy(context = {}) {
+  if (EXTERNAL_SERVER_PROXY_ENABLED) return true;
+  return isPrivateHost(getBaseURLHost(context));
+}
+
+function filterSourceNamesForCaller(sourceNames = [], callerSource = "", context = {}) {
+  let filtered = Array.isArray(sourceNames) ? [...sourceNames] : [];
+  const allowServerProxy = canUseServerProxy(context);
+
+  if (callerSource === "web") {
+    filtered = filtered.filter((name) => name !== "本地代理");
+    OmniBox.log("info", "来源为网页端，已过滤掉\"本地代理\"线路");
+  } else if (callerSource === "emby") {
+    if (allowServerProxy) {
+      filtered = filtered.filter((name) => name === "服务端代理");
+      OmniBox.log("info", "来源为 emby，网盘多线路仅保留\"服务端代理\"");
+    } else {
+      filtered = filtered.filter((name) => name !== "服务端代理");
+      OmniBox.log("info", "来源为 emby 但当前为外网环境且未开启外网代理，已屏蔽\"服务端代理\"线路");
+    }
+  } else if (callerSource === "uz") {
+    filtered = filtered.filter((name) => name !== "本地代理");
+    OmniBox.log("info", "来源为 uz，已屏蔽\"本地代理\"线路");
+  }
+
+  if (!allowServerProxy) {
+    filtered = filtered.filter((name) => name !== "服务端代理");
+  }
+
+  return filtered.length > 0 ? filtered : ["直连"];
+}
+
+function resolveRouteType(flag = "", callerSource = "", context = {}) {
+  const allowServerProxy = canUseServerProxy(context);
+  let routeType = "直连";
+
+  if (callerSource === "web" || callerSource === "emby") {
+    routeType = allowServerProxy ? "服务端代理" : "直连";
+  }
+
+  if (flag) {
+    if (flag.includes("-")) {
+      const flagParts = flag.split("-");
+      routeType = flagParts[flagParts.length - 1];
+    } else {
+      routeType = flag;
+    }
+  }
+
+  if (!allowServerProxy && routeType === "服务端代理") {
+    routeType = "直连";
+  }
+
+  if (callerSource === "uz" && routeType === "本地代理") {
+    routeType = "直连";
+  }
+
+  return routeType;
 }
 
 if (WEB_SITES.length === 0) {
@@ -1037,12 +1131,9 @@ async function detail(params, context) {
 
       if (targetDriveTypes.includes(driveInfo.driveType)) {
         sourceNames = [...configSourceNames];
-        OmniBox.log("info", `${displayName} 匹配成功,线路设置为: ${sourceNames.join(", ")}`);
-
-        if (source === "web") {
-          sourceNames = sourceNames.filter((name) => name !== "本地代理");
-          OmniBox.log("info", `来源为网页端,已过滤线路`);
-        }
+        OmniBox.log("info", `${displayName} 匹配成功,初始线路设置为: ${sourceNames.join(", ")}`);
+        sourceNames = filterSourceNamesForCaller(sourceNames, source, context);
+        OmniBox.log("info", `来源=${source || "unknown"},最终线路设置为: ${sourceNames.join(", ")}`);
       }
 
       for (const sourceName of sourceNames) {
@@ -1275,7 +1366,7 @@ async function play(params, context) {
   try {
     const flag = params.flag || "";
     const playId = params.playId || "";
-    const source = params.source || "";
+    const source = resolveCallerSource(params, context);
 
     OmniBox.log("info", `获取播放地址: flag=${flag}, playId=${playId}`);
 
@@ -1298,11 +1389,7 @@ async function play(params, context) {
 
     OmniBox.log("info", `解析参数: shareURL=${shareURL}, fileId=${fileId}`);
 
-    let routeType = source === "web" ? "服务端代理" : "直连";
-    if (flag && flag.includes("-")) {
-      const flagParts = flag.split("-");
-      routeType = flagParts[flagParts.length - 1];
-    }
+    const routeType = resolveRouteType(flag, source, context);
     OmniBox.log("info", `使用线路: ${routeType}`);
 
     // 并行: 主链路(播放地址) + 辅链路(刮削元数据/弹幕)
