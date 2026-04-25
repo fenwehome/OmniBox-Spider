@@ -2,7 +2,7 @@
 // @author 梦
 // @description 刮削：未接入，弹幕：未接入，嗅探：不需要（直链优先，支持网盘线路展开）
 // @dependencies
-// @version 1.3.7
+// @version 1.3.8
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/LIBVIO.js
 
 const http = require("http");
@@ -916,6 +916,9 @@ async function play(params, context) {
         try {
             const sniffResult = await OmniBox.sniffVideo(sniffTarget, sniffHeaders);
             const sniffUrls = Array.isArray(sniffResult?.urls) ? sniffResult.urls.filter((item) => item?.url) : [];
+            if (!sniffUrls.length && sniffResult?.url) {
+                sniffUrls.push({ name: meta.name || "播放", url: sniffResult.url });
+            }
             if (sniffUrls.length) {
                 logInfo("play SDK嗅探完成", { playPageUrl, from: player.from, sniffTarget, sniffCount: sniffUrls.length, first: sniffUrls[0] || null });
                 return {
