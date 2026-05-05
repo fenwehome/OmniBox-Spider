@@ -385,8 +385,6 @@ async function detail(params = {}) {
         vod_content,
         vod_play_from: playFrom.join('$$$'),
         vod_play_url: playUrl.join('$$$'),
-        playFrom: playFrom,
-        playUrl: playUrl,
         vod_play_list: playFrom.map((name, idx) => ({
           name,
           url: playUrl[idx] || '',
