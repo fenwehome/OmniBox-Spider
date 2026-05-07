@@ -2,7 +2,7 @@
 // @author https://github.com/hjdhnx/drpy-node/blob/main/spider/js/%E4%B8%83%E5%91%B3%5B%E4%BC%98%5D.js
 // @description 刮削：支持，弹幕：支持，嗅探：支持，仅保留七味网盘线路的分组版本
 // @dependencies: axios, cheerio
-// @version      1.5.0
+// @version      1.6.6
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/七味分组.js
 
 const axios = require("axios");
@@ -14,12 +14,17 @@ const DANMU_API = process.env.DANMU_API || "";
 const PANCHECK_API = process.env.PANCHECK_API || "";
 const PANCHECK_ENABLED = String(process.env.PANCHECK_ENABLED || (PANCHECK_API ? "true" : "false")).toLowerCase() === "true";
 const PANCHECK_PLATFORMS = process.env.PANCHECK_PLATFORMS || "quark,baidu,uc,pan123,tianyi,cmcc,aliyun,xunlei,115";
+const QIWEI_115_COOKIE = process.env.QIWEI_115_COOKIE || process.env.WOOG_115_COOKIE || process.env.PAN_115_COOKIE || "";
 
 function splitConfigList(value) {
     return String(value || "")
         .split(/[;,]/)
         .map((item) => item.trim())
         .filter(Boolean);
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 const MAX_PAN_VALID_ROUTES = (() => {
@@ -32,6 +37,7 @@ const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || "
 const EXTERNAL_SERVER_PROXY_ENABLED = String(process.env.EXTERNAL_SERVER_PROXY_ENABLED || "false").toLowerCase() === "true";
 const DRIVE_ORDER = splitConfigList(process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").map((s) => s.toLowerCase());
 const QIWEI_CACHE_EX_SECONDS = Number(process.env.QIWEI_CACHE_EX_SECONDS || 43200);
+const QIWEI_115_MAGNET_CACHE_EX_SECONDS = Number(process.env.QIWEI_115_MAGNET_CACHE_EX_SECONDS || 2592000);
 const QIWEI_PAN_CACHE_VERSION = "v4";
 const PAN_ROUTE_NAMES = SOURCE_NAMES_CONFIG.slice(0, MAX_PAN_VALID_ROUTES);
 
@@ -620,6 +626,10 @@ async function deleteCachedJSON(key) {
         logWarn("删除缓存失败", { key, error: error.message || String(error) });
         return false;
     }
+}
+
+function build115MagnetCacheKey(magnet = "") {
+    return buildCacheKey(`qiwei-group:115-magnet:${QIWEI_PAN_CACHE_VERSION}`, String(magnet || "").trim().toLowerCase());
 }
 
 function inferDriveTypeFromSourceName(name = "") {
@@ -2210,17 +2220,22 @@ async function buildAndCacheVideoPanDetail(video = {}) {
     return payload;
 }
 
-async function getCachedOrBuildVideoPanDetail(video = {}) {
+async function getCachedOrBuildVideoPanDetail(video = {}, options = {}) {
     const videoId = String(video?.vod_id || "").trim();
     if (!videoId) return null;
-    let cached = await getCachedJSON(buildPanGroupDirectoryCacheKey(videoId));
-    if (cached && cached.grouped) {
-        return cached;
-    }
-    cached = await getCachedJSON(buildSearchResultDetailCacheKey(videoId));
-    if (cached && cached.grouped) {
-        await setCachedJSON(buildPanGroupDirectoryCacheKey(videoId), cached, QIWEI_CACHE_EX_SECONDS);
-        return cached;
+    const forceRefresh = options.forceRefresh === true;
+    if (!forceRefresh) {
+        let cached = await getCachedJSON(buildPanGroupDirectoryCacheKey(videoId));
+        if (cached && cached.grouped) {
+            return cached;
+        }
+        cached = await getCachedJSON(buildSearchResultDetailCacheKey(videoId));
+        if (cached && cached.grouped) {
+            await setCachedJSON(buildPanGroupDirectoryCacheKey(videoId), cached, QIWEI_CACHE_EX_SECONDS);
+            return cached;
+        }
+    } else {
+        logInfo("强制刷新详情分组缓存", { videoId, reason: options.reason || "force_refresh" });
     }
     return await buildAndCacheVideoPanDetail(video);
 }
@@ -2352,7 +2367,7 @@ async function getMergedMetadataCached(videoId, title, scrapeCandidates = []) {
     }
 }
 
-async function ensureDetailCache(videoId, video = {}) {
+async function ensureDetailCache(videoId, video = {}, options = {}) {
     const normalizedVideoId = String(videoId || video?.vod_id || "").trim();
     if (!normalizedVideoId) return null;
     const payload = await getCachedOrBuildVideoPanDetail({
@@ -2360,13 +2375,13 @@ async function ensureDetailCache(videoId, video = {}) {
         vod_name: video?.vod_name || "",
         vod_pic: video?.vod_pic || "",
         vod_remarks: video?.vod_remarks || "",
-    });
+    }, options);
     if (!payload) return null;
 
     return {
         cacheValue: payload,
         cacheKey: buildPanGroupDirectoryCacheKey(normalizedVideoId),
-        fromCache: true,
+        fromCache: options.forceRefresh === true ? false : true,
     };
 }
 
@@ -2643,41 +2658,105 @@ async function detail(params, context = {}) {
                 return { list: [] };
             }
             const rawEpisodes = Array.isArray(targetGroup?.episodes) ? targetGroup.episodes : [];
-            let normalizedEpisodes = rawEpisodes.map((ep, index) => ({
-                name: String(ep?.name || (sourceType === "magnet" ? `磁力资源${index + 1}` : `第${index + 1}集`)).trim(),
-                playId: String(ep?.playId || "").trim(),
-                _displayName: String(ep?._displayName || ep?.name || "").trim(),
-                _rawName: String(ep?._rawName || ep?.name || "").trim(),
-                _seedType: String(ep?._seedType || "").trim(),
-                _episodeNumber: Number.isFinite(ep?._episodeNumber) ? ep._episodeNumber : null,
-                _episodeRangeStart: Number.isFinite(ep?._episodeRangeStart) ? ep._episodeRangeStart : null,
-                _episodeRangeEnd: Number.isFinite(ep?._episodeRangeEnd) ? ep._episodeRangeEnd : null,
-            })).filter((ep) => ep.playId);
+            const magnetEpisodeCount = rawEpisodes.filter((ep) => String(ep?.playId || "").trim().startsWith("magnet:")).length;
+            logInfo("磁力/采集线路详情分集统计", {
+                videoId,
+                sourceType,
+                lineIndex: parsed.lineIndex,
+                rawEpisodeCount: rawEpisodes.length,
+                magnetEpisodeCount,
+            });
+            const normalizeSourceEpisodes = (episodes, defaultPrefix) => {
+                let list = (Array.isArray(episodes) ? episodes : []).map((ep, index) => ({
+                    name: String(ep?.name || `${defaultPrefix}${index + 1}`).trim(),
+                    playId: String(ep?.playId || "").trim(),
+                    _displayName: String(ep?._displayName || ep?.name || "").trim(),
+                    _rawName: String(ep?._rawName || ep?.name || "").trim(),
+                    _seedType: String(ep?._seedType || "").trim(),
+                    _episodeNumber: Number.isFinite(ep?._episodeNumber) ? ep._episodeNumber : null,
+                    _episodeRangeStart: Number.isFinite(ep?._episodeRangeStart) ? ep._episodeRangeStart : null,
+                    _episodeRangeEnd: Number.isFinite(ep?._episodeRangeEnd) ? ep._episodeRangeEnd : null,
+                })).filter((ep) => ep.playId);
+                if (sourceType === "magnet") {
+                    list = sortEpisodesByEpisodeNumber(list.map((ep) => ({
+                        ...ep,
+                        name: ep._displayName || ep.name,
+                        episodeNumber: ep._episodeNumber,
+                        episodeRangeStart: ep._episodeRangeStart,
+                        episodeRangeEnd: ep._episodeRangeEnd,
+                    }))).map(({ episodeNumber, episodeRangeStart, episodeRangeEnd, _displayName, _rawName, _seedType, _episodeNumber, _episodeRangeStart, _episodeRangeEnd, ...rest }) => ({
+                        ...rest,
+                        _displayName,
+                        _rawName,
+                        _seedType,
+                        _episodeNumber: _episodeNumber ?? episodeNumber ?? null,
+                        _episodeRangeStart: _episodeRangeStart ?? episodeRangeStart ?? null,
+                        _episodeRangeEnd: _episodeRangeEnd ?? episodeRangeEnd ?? null,
+                    }));
+                }
+                return list;
+            };
+            const rawSourceName = String(targetGroup?.name || (sourceType === "magnet" ? "磁力" : "采集线路")).trim();
+            const normalizedPlaySources = [];
             if (sourceType === "magnet") {
-                normalizedEpisodes = sortEpisodesByEpisodeNumber(normalizedEpisodes.map((ep) => ({
-                    ...ep,
-                    name: ep._displayName || ep.name,
-                    episodeNumber: ep._episodeNumber,
-                    episodeRangeStart: ep._episodeRangeStart,
-                    episodeRangeEnd: ep._episodeRangeEnd,
-                }))).map(({ episodeNumber, episodeRangeStart, episodeRangeEnd, _displayName, _rawName, _seedType, _episodeNumber, _episodeRangeStart, _episodeRangeEnd, ...rest }) => ({
-                    ...rest,
-                    _displayName,
-                    _rawName,
-                    _seedType,
-                    _episodeNumber: _episodeNumber ?? episodeNumber ?? null,
-                    _episodeRangeStart: _episodeRangeStart ?? episodeRangeStart ?? null,
-                    _episodeRangeEnd: _episodeRangeEnd ?? episodeRangeEnd ?? null,
-                }));
+                const convertedEpisodes = [];
+                const convertFailures = [];
+                logInfo("磁力线路开始同步秒传115", {
+                    videoId,
+                    lineIndex: parsed.lineIndex,
+                    has115Cookie: !!QIWEI_115_COOKIE,
+                    magnetEpisodeCount,
+                });
+                for (const ep of rawEpisodes) {
+                    const magnetPlayId = String(ep?.playId || "").trim();
+                    if (!magnetPlayId.startsWith("magnet:")) {
+                        convertFailures.push({ name: ep?.name || "", reason: "not_magnet_play_id" });
+                        continue;
+                    }
+                    const converted = await build115EpisodesFromMagnet(magnetPlayId, ep?.name || "115资源");
+                    if (converted?.episodes?.length) {
+                        convertedEpisodes.push(...converted.episodes);
+                    } else {
+                        convertFailures.push({ name: ep?.name || "", reason: converted?.reason || converted?.state || "no_115_episodes" });
+                    }
+                }
+                const normalized115Episodes = normalizeSourceEpisodes(convertedEpisodes, "115资源");
+                if (normalized115Episodes.length > 0) {
+                    logInfo("磁力线路已秒传并生成115线路", {
+                        videoId,
+                        lineIndex: parsed.lineIndex,
+                        magnetEpisodeCount,
+                        episodeCount: normalized115Episodes.length,
+                        failureCount: convertFailures.length,
+                    });
+                    normalizedPlaySources.push({
+                        name: "115秒传",
+                        episodes: normalized115Episodes.map((ep) => ({
+                            name: ep._displayName || ep.name,
+                            playId: ep.playId,
+                        })),
+                    });
+                } else {
+                    logWarn("磁力线路秒传115失败，仅返回原磁力线路", {
+                        videoId,
+                        lineIndex: parsed.lineIndex,
+                        magnetEpisodeCount,
+                        has115Cookie: !!QIWEI_115_COOKIE,
+                        failures: convertFailures.slice(0, 5),
+                    });
+                }
             }
-            const fallbackSourceName = String(targetGroup?.name || (sourceType === "magnet" ? "磁力线路" : "采集线路")).trim();
-            const normalizedPlaySources = normalizedEpisodes.length > 0 ? [{
-                name: fallbackSourceName,
-                episodes: normalizedEpisodes.map((ep) => ({
-                    name: ep._displayName || ep.name,
-                    playId: ep.playId,
-                })),
-            }] : [];
+            const normalizedMagnetEpisodes = normalizeSourceEpisodes(rawEpisodes, "磁力资源");
+            if (normalizedMagnetEpisodes.length > 0) {
+                normalizedPlaySources.push({
+                    name: sourceType === "magnet" ? "磁力" : rawSourceName,
+                    episodes: normalizedMagnetEpisodes.map((ep) => ({
+                        name: ep._displayName || ep.name,
+                        playId: ep.playId,
+                    })),
+                });
+            }
+            const fallbackSourceName = normalizedPlaySources[0]?.name || rawSourceName;
             const baseVodName = stripPanTypeSuffix(detailInfo.vod_name || video.vod_name || "七味资源");
             return {
                 list: [{
@@ -2887,6 +2966,281 @@ async function detail(params, context = {}) {
     }
 }
 
+function normalize115OfflineFiles(files = []) {
+    return (Array.isArray(files) ? files : [])
+        .map((file, index) => ({
+            id: String(file?.id || file?.fid || file?.file_id || file?.pickcode || file?.pick_code || index).trim(),
+            name: String(file?.name || file?.file_name || file?.server_filename || `115文件${index + 1}`).trim(),
+            size: Number(file?.size || file?.file_size || 0) || 0,
+            pickcode: String(file?.pickcode || file?.pick_code || "").trim(),
+        }))
+        .filter((file) => file.id && file.name);
+}
+
+async function cache115MagnetResult(magnet, result) {
+    const normalizedMagnet = String(magnet || "").trim();
+    if (!normalizedMagnet || !result || !Array.isArray(result.files) || result.files.length === 0) return;
+    await setCachedJSON(build115MagnetCacheKey(normalizedMagnet), result, QIWEI_115_MAGNET_CACHE_EX_SECONDS);
+}
+
+async function pushMagnetTo115(magnet, options = {}) {
+    const cookie = QIWEI_115_COOKIE;
+    const normalizedMagnet = String(magnet || "").trim();
+    const useCache = options.useCache !== false;
+    const pollIntervalMs = Number(options.pollIntervalMs || 1500);
+    const pollMaxAttempts = Number(options.pollMaxAttempts || 4);
+    if (!cookie) {
+        logWarn("115秒传跳过: 未配置 QIWEI_115_COOKIE");
+        return { ok: false, state: "no_cookie", files: [], magnet: normalizedMagnet };
+    }
+    if (!normalizedMagnet.startsWith("magnet:")) {
+        logWarn("115秒传跳过: 无效磁力链接");
+        return { ok: false, state: "invalid_magnet", files: [], magnet: normalizedMagnet };
+    }
+    const cacheKey = build115MagnetCacheKey(normalizedMagnet);
+    if (useCache) {
+        const cached = await getCachedJSON(cacheKey);
+        if (cached && Array.isArray(cached.files) && cached.files.length > 0) {
+            logInfo("115秒传缓存命中", { magnet: normalizedMagnet.substring(0, 80), fileCount: cached.files.length });
+            return { ...cached, ok: true, state: cached.state || "cached", magnet: normalizedMagnet, cached: true };
+        }
+    }
+    try {
+        const uidMatch = cookie.match(/UID=(\d+)/);
+        const uid = uidMatch ? uidMatch[1] : "";
+        if (!uid) {
+            logWarn("115秒传失败: 无法从 cookie 提取 UID");
+            return { ok: false, state: "missing_uid", files: [], magnet: normalizedMagnet };
+        }
+        const commonHeaders = {
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
+            "Cookie": cookie,
+            "Origin": "https://115.com",
+            "Referer": "https://115.com/web/lixian/",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest"
+        };
+        const httpsAgent = new (require("https").Agent)({ rejectUnauthorized: false });
+        const spaceRes = await axios.get("https://115.com/?ct=offline&ac=space", {
+            headers: commonHeaders,
+            timeout: 10000,
+            httpsAgent
+        });
+        const spaceJson = spaceRes.data;
+        if (!spaceJson.state) {
+            logWarn("115秒传失败: 获取签名失败", spaceJson);
+            return { ok: false, state: "space_failed", files: [], magnet: normalizedMagnet, raw: spaceJson };
+        }
+        const sign = spaceJson.sign;
+        const reqTime = spaceJson.time;
+        if (!sign || !reqTime) {
+            logWarn("115秒传失败: 签名数据不完整");
+            return { ok: false, state: "space_invalid", files: [], magnet: normalizedMagnet, raw: spaceJson };
+        }
+        const addTask = async () => {
+            const addRes = await axios.post("https://115.com/web/lixian/?ct=lixian&ac=add_task_url",
+                `url=${encodeURIComponent(normalizedMagnet)}&uid=${uid}&sign=${sign}&time=${reqTime}`,
+                {
+                    headers: {
+                        ...commonHeaders,
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    },
+                    timeout: 15000,
+                    httpsAgent
+                }
+            );
+            return addRes.data || {};
+        };
+        const pollTaskUntilFiles = async (firstJson) => {
+            let currentJson = firstJson || {};
+            for (let attempt = 0; attempt < pollMaxAttempts; attempt++) {
+                const currentFiles = normalize115OfflineFiles(currentJson?.files || []);
+                if (currentFiles.length > 0) return { json: currentJson, files: currentFiles, attempts: attempt };
+                await sleep(pollIntervalMs);
+                currentJson = await addTask();
+                const nextFiles = normalize115OfflineFiles(currentJson?.files || []);
+                if (nextFiles.length > 0) return { json: currentJson, files: nextFiles, attempts: attempt + 1 };
+                if (currentJson?.errcode === 10008) return { json: currentJson, files: nextFiles, attempts: attempt + 1 };
+            }
+            return { json: currentJson, files: normalize115OfflineFiles(currentJson?.files || []), attempts: pollMaxAttempts };
+        };
+        const addJson = await addTask();
+        let files = normalize115OfflineFiles(addJson?.files || []);
+        let finalJson = addJson;
+        let pollAttempts = 0;
+        if ((addJson.state || addJson.errcode === 0 || addJson.errcode === 10008) && files.length === 0) {
+            const polled = await pollTaskUntilFiles(addJson);
+            finalJson = polled.json || addJson;
+            files = polled.files || [];
+            pollAttempts = polled.attempts || 0;
+        }
+        if (finalJson.state || finalJson.errcode === 0 || finalJson.errcode === 10008) {
+            const result = {
+                ok: true,
+                state: finalJson.errcode === 10008 ? "exists" : (files.length > 0 ? "submitted" : "submitted_waiting"),
+                magnet: normalizedMagnet,
+                infoHash: String(finalJson.info_hash || "").trim(),
+                files,
+                raw: finalJson,
+            };
+            logInfo(finalJson.errcode === 10008 ? "115任务已存在" : (files.length > 0 ? "115秒传成功" : "115秒传提交后轮询中"), {
+                magnet: normalizedMagnet.substring(0, 80),
+                fileCount: files.length,
+                attempts: pollAttempts,
+            });
+            if (files.length > 0) await cache115MagnetResult(normalizedMagnet, result);
+            return result;
+        }
+        logWarn("115秒传失败", finalJson);
+        return { ok: false, state: "add_failed", files, magnet: normalizedMagnet, raw: finalJson };
+    } catch (error) {
+        logError("115秒传异常", error);
+        return { ok: false, state: "exception", files: [], magnet: normalizedMagnet, error: error.message || String(error) };
+    }
+}
+
+async function build115EpisodesFromMagnet(magnet, baseName = "115资源") {
+    const result = await pushMagnetTo115(magnet);
+    if (!result?.ok) {
+        logWarn("115秒传未生成剧集", {
+            magnet: String(magnet || "").slice(0, 100),
+            state: result?.state || "unknown",
+            error: result?.error || "",
+            fileCount: Array.isArray(result?.files) ? result.files.length : 0,
+        });
+        return { episodes: [], reason: result?.state || "push_failed", state: result?.state || "" };
+    }
+    if (!Array.isArray(result.files) || result.files.length === 0) {
+        logWarn("115秒传成功但未返回文件列表", {
+            magnet: String(magnet || "").slice(0, 100),
+            state: result?.state || "",
+            rawKeys: result?.raw && typeof result.raw === "object" ? Object.keys(result.raw).slice(0, 12) : [],
+        });
+        return { episodes: [], reason: "empty_files", state: result?.state || "" };
+    }
+    const episodes = result.files.map((file, index) => {
+        const name = file.size > 0 ? `[${formatFileSize(file.size)}] ${file.name}` : file.name;
+        const playMeta = encodeMeta({ type: "115_magnet", magnet, fileName: file.name, fileId: file.id, pickcode: file.pickcode });
+        return {
+            name: name || `${baseName}${index + 1}`,
+            playId: `115magnet:${Buffer.from(JSON.stringify({ magnet, fileId: file.id, pickcode: file.pickcode, fileName: file.name }), "utf8").toString("base64")}|||${playMeta}`,
+            _fid: `115magnet:${result.infoHash || crypto.createHash("sha1").update(String(magnet || "")).digest("hex")}:${file.id}`,
+            _rawName: file.name,
+            _displayName: name || file.name,
+            _seedType: "115",
+            _episodeNumber: extractEpisodeNumber(file.name),
+            _episodeRangeStart: null,
+            _episodeRangeEnd: null,
+        };
+    });
+    return { name: "115网盘", episodes, result };
+}
+
+function build115Headers() {
+    return {
+        "User-Agent": DEFAULT_HEADERS["User-Agent"],
+        "Cookie": QIWEI_115_COOKIE,
+        "Origin": "https://115.com",
+        "Referer": "https://115.com/",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+    };
+}
+
+function same115FileName(a = "", b = "") {
+    const basename = (value) => String(value || "").split(/[\\/]/).pop().trim();
+    return basename(a) && basename(a) === basename(b);
+}
+
+async function find115FileByName(fileName = "") {
+    const targetName = String(fileName || "").trim();
+    if (!targetName || !QIWEI_115_COOKIE) return null;
+    const key = buildCacheKey("qiwei-group:115-file", targetName);
+    const cached = await getCachedJSON(key);
+    if (cached?.fid || cached?.pickcode) {
+        logInfo("115文件搜索缓存命中", { fileName: targetName, fid: cached.fid || "", pickcode: cached.pickcode || "" });
+        return cached;
+    }
+
+    const keyword = targetName.split(/[\\/]/).pop().replace(/\.[a-z0-9]{2,5}$/i, "").slice(0, 80);
+    const url = `https://webapi.115.com/files/search?search_value=${encodeURIComponent(keyword)}&format=json&type=4&limit=50`;
+    const res = await axios.get(url, {
+        headers: build115Headers(),
+        timeout: 10000,
+        httpsAgent: new (require("https").Agent)({ rejectUnauthorized: false }),
+    });
+    const json = res.data || {};
+    const list = Array.isArray(json?.data) ? json.data : (Array.isArray(json?.data?.list) ? json.data.list : (Array.isArray(json?.files) ? json.files : []));
+    const normalized = list.map((item) => ({
+        fid: String(item.fid || item.file_id || item.id || item.cid || "").trim(),
+        name: String(item.n || item.name || item.file_name || item.server_filename || "").trim(),
+        pickcode: String(item.pc || item.pickcode || item.pick_code || "").trim(),
+        size: Number(item.s || item.size || item.file_size || 0) || 0,
+    })).filter((item) => item.name && (item.fid || item.pickcode));
+    const matched = normalized.find((item) => same115FileName(item.name, targetName)) || normalized[0] || null;
+    logInfo("115文件搜索结果", { keyword, targetName, resultCount: normalized.length, matched: matched?.name || "" });
+    if (matched) await setCachedJSON(key, matched, QIWEI_115_MAGNET_CACHE_EX_SECONDS);
+    return matched;
+}
+
+async function get115VideoPlayUrl(file) {
+    const pickcode = String(file?.pickcode || file?.pc || "").trim();
+    if (!pickcode) throw new Error("115真实文件缺少 pickcode，无法解析播放地址");
+    const headers = build115Headers();
+    const urls = [
+        `https://115.com/api/video/m3u8/${encodeURIComponent(pickcode)}.m3u8`,
+        `https://webapi.115.com/files/video?pickcode=${encodeURIComponent(pickcode)}`,
+    ];
+    let lastError = null;
+    for (const url of urls) {
+        try {
+            const res = await axios.get(url, {
+                headers,
+                timeout: 10000,
+                maxRedirects: 0,
+                validateStatus: (status) => status >= 200 && status < 400,
+                httpsAgent: new (require("https").Agent)({ rejectUnauthorized: false }),
+            });
+            const location = res.headers?.location || "";
+            if (location) return location;
+            if (typeof res.data === "string" && res.data.includes("#EXTM3U")) return url;
+            const data = res.data || {};
+            const candidate = data?.data?.video_url || data?.data?.url || data?.video_url || data?.url || data?.data?.m3u8 || data?.m3u8 || "";
+            if (candidate) return candidate;
+        } catch (error) {
+            lastError = error;
+            logWarn("115视频地址解析尝试失败", { pickcode, url, error: error.message || String(error) });
+        }
+    }
+    throw lastError || new Error("115未返回可播放地址");
+}
+
+async function resolve115MagnetPlay(playId, flag, callerSource, context) {
+    const raw = String(playId || "").replace(/^115magnet:/, "");
+    const data = safeJsonParse(Buffer.from(raw, "base64").toString("utf8"), null) || {};
+    const magnet = String(data.magnet || "").trim();
+    const targetFileId = String(data.fileId || "").trim();
+    const result = await pushMagnetTo115(magnet);
+    const targetFile = (result.files || []).find((file) => String(file.id) === targetFileId) || (result.files || [])[0];
+    if (!targetFile?.name) throw new Error("115秒传缓存未找到目标文件名");
+
+    const realFile = await find115FileByName(targetFile.name);
+    if (!realFile) throw new Error("115网盘内未搜索到真实文件");
+    const playUrl = await get115VideoPlayUrl(realFile);
+    logInfo("115磁力文件播放地址返回", { fid: realFile.fid || "", pickcode: realFile.pickcode || "", fileName: realFile.name || targetFile.name });
+    return {
+        urls: [{ name: "115播放", url: playUrl }],
+        flag: "115网盘",
+        header: {
+            "User-Agent": DEFAULT_HEADERS["User-Agent"],
+            "Referer": "https://115.com/",
+            "Cookie": QIWEI_115_COOKIE,
+        },
+        parse: 0,
+        danmaku: [],
+    };
+}
+
 async function play(params, context = {}) {
     let playId = String(params.playId || "").trim();
     const flag = String(params.flag || "").trim();
@@ -2913,9 +3267,21 @@ async function play(params, context = {}) {
         logInfo("解析透传信息", { sid: playMeta.sid || "", fid: playMeta.fid || "", e: playMeta.e || "" });
     }
 
+    if (playId.startsWith("115magnet:")) {
+        try {
+            return await resolve115MagnetPlay(playId, flag, callerSource, context);
+        } catch (error) {
+            logWarn("115磁力播放失败，回退磁力", { error: error.message || String(error), fileName: playMeta.fileName || "" });
+            if (playMeta.magnet) playId = playMeta.magnet;
+            else throw error;
+        }
+    }
+
     if (playId.startsWith("magnet:")) {
+        const pushed = await pushMagnetTo115(playId);
+        const displayName = pushed?.ok ? "磁力资源（已提交115）" : "磁力资源";
         return {
-            urls: [{ name: "磁力资源", url: playId }],
+            urls: [{ name: displayName, url: playId }],
             parse: 0,
             header: {
                 ...DEFAULT_HEADERS,
