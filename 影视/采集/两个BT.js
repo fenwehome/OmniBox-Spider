@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.0.7
+// @version 1.0.8
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/两个BT.js
 /**
  * ============================================================================
@@ -117,12 +117,6 @@ const getPlayPath = (url) => {
   return slug ? `/play/${slug}` : "";
 };
 
-const buildAbsoluteUrl = (url) => {
-  if (!url) return host;
-  if (url.startsWith("http")) return url;
-  return url.startsWith("/") ? host + url : `${host}/${url}`;
-};
-
 const getDetailField = ($, label) => {
   let value = "";
   $("div").each((_, elem) => {
@@ -137,24 +131,133 @@ const getDetailField = ($, label) => {
   return value;
 };
 
-const CATEGORY_ROUTES = {
-  movie: "/filter?classify=1",
-  tv: "/filter?classify=2",
-  anime: "/filter?classify=3",
-  zgjun: "/filter?classify=2&areas=7,52",
-  meiju: "/filter?classify=2&areas=5",
-  jpsrtv: "/filter?classify=2&areas=11,12",
-  gf: "/filter?sort_by=score&order=desc",
-  "movie_bt_tags/xiju": "/filter?types=5",
-  "movie_bt_tags/aiqing": "/filter?types=6",
-  "movie_bt_tags/adt": "/filter?types=18",
-  "movie_bt_tags/at": "/filter?types=10",
-  "movie_bt_tags/donghua": "/filter?types=11",
-  "movie_bt_tags/qihuan": "/filter?types=12",
-  "movie_bt_tags/xuanni": "/filter?types=2",
-  "movie_bt_tags/kehuan": "/filter?types=14",
-  "movie_bt_tags/juqing": "/filter?types=1",
-  "movie_bt_tags/kongbu": "/filter?types=3",
+const CLASS_LIST = [
+  { type_id: "movie", type_name: "电影" },
+  { type_id: "tv", type_name: "电视剧" },
+  { type_id: "anime", type_name: "动漫" },
+  { type_id: "variety", type_name: "综艺" },
+];
+
+const makeFilterValues = (items) => [
+  { name: "全部", value: "" },
+  ...items.map(([value, name]) => ({ name, value })),
+];
+
+const AREA_VALUES = makeFilterValues([
+  ["5", "美国"],
+  ["6", "法国"],
+  ["7", "中国"],
+  ["9", "unknown"],
+  ["11", "日本"],
+  ["12", "韩国"],
+  ["14", "中国香港"],
+  ["16", "俄罗斯"],
+  ["17", "波兰"],
+  ["18", "德国"],
+  ["19", "意大利"],
+  ["21", "中国台湾"],
+  ["22", "澳大利亚"],
+  ["24", "西班牙"],
+  ["30", "英国"],
+  ["32", "加拿大"],
+  ["33", "泰国"],
+  ["34", "印度"],
+  ["41", "丹麦"],
+  ["52", "中国大陆"],
+  ["65", "马来西亚"],
+  ["74", "菲律宾"],
+  ["78", "其他"],
+  ["79", "瑞典"],
+  ["80", "挪威"],
+  ["81", "阿根廷"],
+  ["82", "冰岛"],
+  ["83", "保加利亚"],
+]);
+
+const TYPE_VALUES = makeFilterValues([
+  ["1", "剧情"],
+  ["2", "悬疑"],
+  ["3", "恐怖"],
+  ["4", "惊悚"],
+  ["5", "喜剧"],
+  ["6", "爱情"],
+  ["9", "犯罪"],
+  ["10", "动作"],
+  ["11", "动画"],
+  ["12", "奇幻"],
+  ["13", "音乐"],
+  ["14", "科幻"],
+  ["15", "历史"],
+  ["16", "战争"],
+  ["18", "冒险"],
+  ["19", "家庭"],
+  ["20", "纪录"],
+  ["23", "西部"],
+  ["24", "电视电影"],
+  ["25", "情色"],
+  ["26", "真人秀"],
+  ["27", "古装"],
+  ["28", "传记"],
+  ["29", "同性"],
+  ["30", "运动"],
+  ["31", "武侠"],
+  ["32", "歌舞"],
+  ["33", "纪录片"],
+  ["34", "灾难"],
+  ["35", "短片"],
+]);
+
+const YEAR_VALUES = makeFilterValues([
+  ["1", "2026"], ["3", "2025"], ["4", "2024"], ["56", "2023"], ["13", "2022"],
+  ["2", "2021"], ["6", "2020"], ["8", "2019"], ["9", "2018"], ["12", "2017"],
+  ["11", "2016"], ["14", "2015"], ["15", "2014"], ["22", "2013"], ["10", "2012"],
+  ["17", "2011"], ["25", "2010"], ["20", "2009"], ["23", "2008"], ["30", "2007"],
+  ["31", "2006"], ["7", "2005"], ["24", "2004"], ["28", "2003"], ["19", "2002"],
+  ["29", "2001"], ["43", "2000"], ["45", "1999"], ["33", "1998"], ["34", "1997"],
+  ["37", "1996"], ["21", "1995"], ["27", "1994"], ["26", "1993"], ["35", "1992"],
+  ["18", "1991"], ["42", "1990"], ["44", "1989"], ["60", "1988"], ["73", "1987"],
+  ["32", "1986"], ["40", "1985"], ["63", "1984"], ["59", "1983"], ["36", "1982"],
+  ["5", "1981"], ["39", "1980"], ["61", "1979"], ["66", "1978"], ["48", "1977"],
+  ["38", "1976"], ["57", "1975"], ["62", "1974"], ["53", "1973"], ["54", "1972"],
+  ["51", "1971"], ["41", "1969"], ["58", "1965"], ["46", "1963"], ["65", "1962"],
+  ["71", "1961"], ["75", "1960"], ["16", "1959"], ["67", "1958"], ["50", "1957"],
+  ["49", "1956"], ["47", "1955"], ["68", "1954"], ["72", "1952"], ["70", "1949"],
+  ["64", "1948"], ["52", "1938"], ["55", "1931"], ["69", "1925"], ["74", "1921"],
+]);
+
+const TAG_VALUES = makeFilterValues([
+  ["1", "4k"],
+  ["36", "院线"],
+]);
+
+const SORT_VALUES = [
+  { name: "最新上映", value: "update_time:desc" },
+  { name: "最受欢迎", value: "hits:desc" },
+  { name: "评分最高", value: "score:desc" },
+];
+
+const buildCategoryFilterList = () => [
+  { key: "areas", name: "地区", value: AREA_VALUES },
+  { key: "types", name: "类型", value: TYPE_VALUES },
+  { key: "years", name: "年份", value: YEAR_VALUES },
+  { key: "tags", name: "标签", value: TAG_VALUES },
+  { key: "sort", name: "排序", value: SORT_VALUES },
+];
+
+const FILTERS = CLASS_LIST.reduce((filters, item) => {
+  filters[item.type_id] = buildCategoryFilterList();
+  return filters;
+}, {});
+
+const CATEGORY_BASE_FILTERS = {
+  movie: { classify: "1" },
+  tv: { classify: "2" },
+  anime: { classify: "3" },
+  variety: { classify: "4" },
+  zgjun: { classify: "2", areas: "7,52" },
+  meiju: { classify: "2", areas: "5" },
+  jpsrtv: { classify: "2", areas: "11,12" },
+  gf: { sort_by: "score", order: "desc" },
 };
 
 const appendQuery = (url, params = {}) => {
@@ -166,6 +269,31 @@ const appendQuery = (url, params = {}) => {
   if (parts.length === 0) return url;
   return url + (url.includes("?") ? "&" : "?") + parts.join("&");
 };
+
+const parseFilterObject = (value) => {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return {};
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    try {
+      return JSON.parse(Buffer.from(value, "base64").toString("utf8"));
+    } catch {
+      return {};
+    }
+  }
+};
+
+const getRequestFilters = (params = {}) => ({
+  ...parseFilterObject(params.filters),
+  ...parseFilterObject(params.extend),
+  ...parseFilterObject(params.ext),
+  ...parseFilterObject(params.filter),
+});
+
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
 /**
  * 检查搜索结果相关性
@@ -403,23 +531,57 @@ const parsePlaySources = ($, vodId) => {
  */
 const buildUrl = (tid, pg, extend = {}) => {
   try {
-    const tidStr = String(tid || "filter");
-    const route = CATEGORY_ROUTES[tidStr] || (tidStr.startsWith("/") ? tidStr : `/${tidStr}`);
-    let url = buildAbsoluteUrl(route);
+    const tidStr = String(tid || "movie");
+    const query = { ...(CATEGORY_BASE_FILTERS[tidStr] || (/^\d+$/.test(tidStr) ? { classify: tidStr } : { classify: "1" })) };
+
+    const setFilter = (targetKey, sourceKeys) => {
+      for (const key of sourceKeys) {
+        if (!hasOwn(extend, key)) continue;
+        const value = extend[key];
+        if (value === "" || value === undefined || value === null) {
+          delete query[targetKey];
+        } else {
+          query[targetKey] = String(value);
+        }
+        return;
+      }
+    };
+
+    setFilter("classify", ["classify"]);
+    setFilter("areas", ["areas", "area"]);
+    setFilter("types", ["types", "type", "class"]);
+    setFilter("years", ["years", "year"]);
+    setFilter("tags", ["tags", "tag"]);
+
+    if (hasOwn(extend, "sort") || hasOwn(extend, "by") || hasOwn(extend, "sort_by") || hasOwn(extend, "order")) {
+      const rawSort = String(extend.sort || extend.by || "");
+      if (rawSort) {
+        const [field, order] = rawSort.split(/[:|,]/);
+        query.sort_by = field;
+        query.order = order || query.order || "desc";
+      } else if (hasOwn(extend, "sort") || hasOwn(extend, "by")) {
+        delete query.sort_by;
+        delete query.order;
+      }
+
+      if (extend.sort_by) {
+        query.sort_by = String(extend.sort_by);
+        query.order = String(extend.order || query.order || "desc");
+      } else if (hasOwn(extend, "sort_by") && !extend.sort_by) {
+        delete query.sort_by;
+        delete query.order;
+      }
+
+      if (extend.order) {
+        query.order = String(extend.order);
+      }
+    }
 
     if (pg && Number(pg) > 1) {
-      url = appendQuery(url, { page: pg });
+      query.page = String(pg);
     }
 
-    if (extend.area) {
-      url = appendQuery(url, { areas: extend.area });
-    }
-
-    if (extend.year) {
-      url = appendQuery(url, { years: extend.year });
-    }
-
-    return url;
+    return appendQuery(`${host}/filter`, query);
   } catch (error) {
     logError("构建URL错误", error);
     return host + "/filter";
@@ -431,24 +593,8 @@ const buildUrl = (tid, pg, extend = {}) => {
 async function home(params) {
   logInfo("进入首页");
   const result = {
-    class: [{ type_id: "movie", type_name: "电影" },
-    { type_id: "tv", type_name: "电视剧" },
-    { type_id: "anime", type_name: "动漫" },
-    { type_id: "zgjun", type_name: "国产剧" },
-    { type_id: "meiju", type_name: "美剧" },
-    { type_id: "jpsrtv", type_name: "日韩剧" },
-    { type_id: "movie_bt_tags/xiju", type_name: "喜剧" },
-    { type_id: "movie_bt_tags/aiqing", type_name: "爱情" },
-    { type_id: "movie_bt_tags/adt", type_name: "冒险" },
-    { type_id: "movie_bt_tags/at", type_name: "动作" },
-    { type_id: "movie_bt_tags/donghua", type_name: "动画" },
-    { type_id: "movie_bt_tags/qihuan", type_name: "奇幻" },
-    { type_id: "movie_bt_tags/xuanni", type_name: "悬疑" },
-    { type_id: "movie_bt_tags/kehuan", type_name: "科幻" },
-    { type_id: "movie_bt_tags/juqing", type_name: "剧情" },
-    { type_id: "movie_bt_tags/kongbu", type_name: "恐怖" },
-    { type_id: "gf", type_name: "高分电影" },
-    ],
+    class: CLASS_LIST,
+    filters: FILTERS,
     list: [],
   };
 
@@ -468,12 +614,13 @@ async function home(params) {
 }
 
 async function category(params) {
-  const { categoryId, page } = params;
-  const pg = parseInt(page) || 1;
-  logInfo(`请求分类: ${categoryId}, 页码: ${pg}`);
+  const categoryId = params.categoryId || params.type_id || params.tid || "movie";
+  const filters = getRequestFilters(params);
+  const pg = parseInt(params.page) || 1;
+  logInfo(`请求分类: ${categoryId}, 页码: ${pg}, 筛选: ${JSON.stringify(filters)}`);
 
   try {
-    const url = buildUrl(categoryId, pg);
+    const url = buildUrl(categoryId, pg, filters);
     logInfo(`分类URL: ${url}`);
 
     const res = await axiosInstance.get(url, { headers: def_headers });
@@ -487,6 +634,7 @@ async function category(params) {
       list: list,
       page: pg,
       pagecount: list.length >= PAGE_LIMIT ? pg + 1 : pg,
+      filters: FILTERS[String(categoryId)] || [],
     };
   } catch (e) {
     logError("分类请求失败", e);
